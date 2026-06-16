@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     yolo_seg_model: str = "weights/yoloe-26l-seg.pt"
-    yolo_pose_model: str = "weights/yolo26n-pose.pt"
+    yolo_pose_model: str = "weights/yolo26l-pose.pt"
     qwen_model: str = "Qwen/Qwen3-VL-8B-Instruct"
-    mobilenet_model: str = "weights/mobilenetv3.pth"
+    mobilenet_model: str = "weights/mobilenetv3-large-1cd25616.pth"
     qwen_enabled: bool = True
     qwen_device_map: str = "auto"
     qwen_max_new_tokens: int = Field(default=128, ge=16)
