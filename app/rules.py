@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from app.inference.base import Detection, FrameContext
 
@@ -32,12 +33,22 @@ class Finding:
     message: str | None = None
 
 
+class PPESummaryLike(Protocol):
+    person_count: int
+    helmet_count: int
+    vest_count: int
+    missing_helmet: bool
+    missing_vest: bool
+    tracked_people: list[dict]
+
+
 def summarize_frame(
     frame: FrameContext,
     detections: list[Detection],
     scene: tuple[str, float],
     briefing: tuple[bool, float],
     height_work: tuple[bool, float],
+    ppe_summary: PPESummaryLike | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     labels = {d.label for d in detections}
@@ -64,12 +75,32 @@ def summarize_frame(
         )
     )
 
-    person_count = sum(1 for d in detections if d.label == "person")
-    helmet_count = sum(1 for d in detections if d.label in HELMET_LABELS)
-    vest_count = sum(1 for d in detections if d.label in VEST_LABELS)
+    person_count = (
+        ppe_summary.person_count
+        if ppe_summary is not None
+        else sum(1 for d in detections if d.label == "person")
+    )
+    helmet_count = (
+        ppe_summary.helmet_count
+        if ppe_summary is not None
+        else sum(1 for d in detections if d.label in HELMET_LABELS)
+    )
+    vest_count = (
+        ppe_summary.vest_count
+        if ppe_summary is not None
+        else sum(1 for d in detections if d.label in VEST_LABELS)
+    )
     if person_count:
-        missing_helmet = helmet_count < person_count
-        missing_vest = vest_count < person_count
+        missing_helmet = (
+            ppe_summary.missing_helmet
+            if ppe_summary is not None
+            else helmet_count < person_count
+        )
+        missing_vest = (
+            ppe_summary.missing_vest
+            if ppe_summary is not None
+            else vest_count < person_count
+        )
         ppe_ok = not missing_helmet and not missing_vest
         findings.append(
             Finding(
@@ -83,6 +114,9 @@ def summarize_frame(
                     "vest_count": vest_count,
                     "missing_helmet": missing_helmet,
                     "missing_vest": missing_vest,
+                    "tracked_people": ppe_summary.tracked_people
+                    if ppe_summary is not None
+                    else [],
                 },
                 alert=not ppe_ok,
                 severity="warning",

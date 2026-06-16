@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db, init_db
+from app.logging_config import configure_logging
 from app.models import AlertEvent, DetectionEvent, VideoJob
 from app.processor import VideoProcessor
 from app.schemas import (
@@ -21,6 +22,7 @@ app = FastAPI(title="Supervisor Agent", version="0.1.0")
 
 @app.on_event("startup")
 def startup() -> None:
+    configure_logging(get_settings().log_level)
     init_db()
 
 

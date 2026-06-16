@@ -31,7 +31,7 @@
 - `yolo26n-pose.pt`
 - `MobileNetV3`
 
-当前代码已实现模型适配层。YOLO 权重文件存在时会自动加载；没有权重时，服务仍可启动、创建任务、写数据库，方便先对接前后端与任务流程。Qwen/MobileNetV3 预留了稳定接口，后续可替换为 GPU 推理实现。
+当前代码已实现模型适配层。YOLO 权重文件存在时会自动加载；没有权重时，服务仍可启动、创建任务、写数据库，方便先对接前后端与任务流程。Qwen3-VL 已接入 Transformers 推理；依赖或模型不可用时会打印日志并回退到保守规则。
 
 ## 识别目标
 
@@ -48,15 +48,17 @@
 
 原始思路是“YOLO 实时识别 -> 跟踪筛选 -> 大模型确认 -> 重点项直接上报告警”。实现时做了两点优化：
 
-- 将“检测、视觉语言确认、规则归并、告警推送、数据库写入”拆成独立模块，便于替换真实模型或加入跟踪器。
+- 将“检测、人员/PPE 跟踪关联、视觉语言确认、规则归并、告警推送、数据库写入”拆成独立模块。
 - 离线视频和视频流共用同一条处理链路；视频流任务保留实时告警能力，离线视频任务处理完成后标记为 `completed`。
+- PPE 检测不再只按单帧数量判断，而是优先使用 ByteTrack / DeepSORT track_id，并用内置 IoU 跟踪回退，把安全帽、反光衣与人员目标进行多帧稳定关联。
 
 主要模块：
 
 - `app/api.py`：FastAPI 接口，提交离线视频/视频流任务，查询任务、事件和告警。
 - `app/processor.py`：打开视频源、抽帧、调用模型、入库。
 - `app/inference/yolo.py`：Ultralytics YOLO 适配器，自动加载 `weights/yoloe-26l-seg.pt` 和 `weights/yolo26n-pose.pt`。
-- `app/inference/qwen.py`：Qwen-VL 确认接口，目前提供保守规则实现，后续替换真实 Qwen 推理。
+- `app/tracking.py`：人员目标跟踪和 PPE 关联，降低安全帽/反光衣误报。
+- `app/inference/qwen.py`：Qwen3-VL 确认接口，用于场景、交底行为、登高作业二次确认。
 - `app/rules.py`：将检测结果归并为六类业务事件，并对 PPE、抽烟、动火生成告警。
 - `app/models.py`：数据库表结构。
 
@@ -88,8 +90,20 @@ export SUPERVISOR_DATABASE_URL='sqlite:///./data/supervisor.db'
 export SUPERVISOR_FRAME_SAMPLE_INTERVAL=15
 export SUPERVISOR_YOLO_SEG_MODEL='weights/yoloe-26l-seg.pt'
 export SUPERVISOR_YOLO_POSE_MODEL='weights/yolo26n-pose.pt'
+export SUPERVISOR_QWEN_MODEL='Qwen/Qwen3-VL-8B-Instruct'
+export SUPERVISOR_QWEN_ENABLED=true
+export SUPERVISOR_TRACKER_BACKEND='bytetrack'
+export SUPERVISOR_PPE_REQUIRED_HITS=2
+export SUPERVISOR_PPE_MISSING_TOLERANCE=2
+export SUPERVISOR_LOG_LEVEL='INFO'
 export SUPERVISOR_ALERT_WEBHOOK_URL='http://127.0.0.1:9000/alerts'
 ```
+
+`SUPERVISOR_TRACKER_BACKEND` 可选：
+
+- `bytetrack`：默认值，使用 Ultralytics 内置 ByteTrack。
+- `deepsort`：使用 `deep-sort-realtime` 给人员框补充 track_id。
+- 其他值或跟踪器不可用时：使用 `app/tracking.py` 内置 IoU 跟踪回退。
 
 ## API 示例
 
@@ -131,7 +145,6 @@ python -m app.cli /data/videos/site.mp4 --camera-id camera-001
 
 ## 后续可增强项
 
-- 接入 ByteTrack / DeepSORT，把安全帽、反光衣与人员目标做稳定关联，降低 PPE 误报。
-- 将 `VisionLanguageVerifier` 替换为真实 Qwen3-VL 推理，用于交底行为、场景、登高作业二次确认。
 - 接入 MobileNetV3 做抽烟/明火小目标二分类复核。
 - 将视频流任务改为独立 worker 或队列消费，支持多路摄像头长期运行。
+- 将 Qwen3-VL 推理结果缓存到帧级中间表，便于复核和调参。

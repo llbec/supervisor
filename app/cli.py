@@ -4,11 +4,13 @@ import argparse
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
+from app.logging_config import configure_logging
 from app.models import VideoJob
 from app.processor import VideoProcessor
 
 
 def main() -> None:
+    configure_logging(get_settings().log_level)
     parser = argparse.ArgumentParser(description="Process one construction-site video.")
     parser.add_argument("source", help="Local video path or stream URL.")
     parser.add_argument("--camera-id", default=None)

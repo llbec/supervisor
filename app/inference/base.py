@@ -9,6 +9,7 @@ class Detection:
     label: str
     confidence: float
     bbox: tuple[float, float, float, float] | None = None
+    track_id: int | None = None
     source: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
 
