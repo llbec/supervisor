@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     qwen_model: str = "Qwen/Qwen3-VL-8B-Instruct"
     mobilenet_model: str = "weights/mobilenetv3-large-1cd25616.pth"
     qwen_enabled: bool = True
+    qwen_use_modelscope: bool = True
+    qwen_modelscope_model: str | None = None
+    qwen_modelscope_revision: str | None = None
+    qwen_cache_dir: str | None = "data/modelscope"
     qwen_device_map: str = "auto"
     qwen_max_new_tokens: int = Field(default=128, ge=16)
 

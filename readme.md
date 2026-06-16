@@ -31,7 +31,7 @@
 - `yolo26n-pose.pt`
 - `MobileNetV3`
 
-当前代码已实现模型适配层。YOLO 权重文件存在时会自动加载；没有权重时，服务仍可启动、创建任务、写数据库，方便先对接前后端与任务流程。Qwen3-VL 已接入 Transformers 推理；依赖或模型不可用时会打印日志并回退到保守规则。
+当前代码已实现模型适配层。YOLO 权重文件存在时会自动加载；没有权重时，服务仍可启动、创建任务、写数据库，方便先对接前后端与任务流程。Qwen3-VL 已接入 Transformers 推理，并默认通过 ModelScope 下载/缓存模型；依赖或模型不可用时会打印日志并回退到保守规则。
 
 ## 识别目标
 
@@ -92,12 +92,21 @@ export SUPERVISOR_YOLO_SEG_MODEL='weights/yoloe-26l-seg.pt'
 export SUPERVISOR_YOLO_POSE_MODEL='weights/yolo26n-pose.pt'
 export SUPERVISOR_QWEN_MODEL='Qwen/Qwen3-VL-8B-Instruct'
 export SUPERVISOR_QWEN_ENABLED=true
+export SUPERVISOR_QWEN_USE_MODELSCOPE=true
+export SUPERVISOR_QWEN_MODELSCOPE_MODEL='Qwen/Qwen3-VL-8B-Instruct'
+export SUPERVISOR_QWEN_CACHE_DIR='data/modelscope'
 export SUPERVISOR_TRACKER_BACKEND='bytetrack'
 export SUPERVISOR_PPE_REQUIRED_HITS=2
 export SUPERVISOR_PPE_MISSING_TOLERANCE=2
 export SUPERVISOR_LOG_LEVEL='INFO'
 export SUPERVISOR_ALERT_WEBHOOK_URL='http://127.0.0.1:9000/alerts'
 ```
+
+Qwen 模型加载顺序：
+
+1. 如果 `SUPERVISOR_QWEN_MODEL` 是本地目录，直接从该目录加载。
+2. 如果 `SUPERVISOR_QWEN_USE_MODELSCOPE=true`，使用 ModelScope `snapshot_download` 下载 `SUPERVISOR_QWEN_MODELSCOPE_MODEL`，并从本地缓存目录加载。
+3. 如果 ModelScope 不可用或下载失败，回退为直接把 `SUPERVISOR_QWEN_MODEL` 交给 Transformers 加载；仍失败则使用规则回退。
 
 `SUPERVISOR_TRACKER_BACKEND` 可选：
 

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.config import Settings
@@ -60,21 +61,65 @@ class VisionLanguageVerifier:
             return
 
         try:
+            model_path = self._resolve_qwen_model_path()
             self.processor = AutoProcessor.from_pretrained(
-                self.settings.qwen_model,
+                model_path,
                 trust_remote_code=True,
             )
             self.model = AutoModelForImageTextToText.from_pretrained(
-                self.settings.qwen_model,
+                model_path,
                 device_map=self.settings.qwen_device_map,
                 torch_dtype="auto",
                 trust_remote_code=True,
             )
-            logger.info("loaded Qwen-VL verifier: %s", self.settings.qwen_model)
+            logger.info("loaded Qwen-VL verifier: %s", model_path)
         except Exception as exc:
             self.processor = None
             self.model = None
             logger.exception("failed to load Qwen-VL verifier, using rule fallback: %s", exc)
+
+    def _resolve_qwen_model_path(self) -> str:
+        model_id = self.settings.qwen_model
+        if Path(model_id).exists():
+            logger.info("using local Qwen model path: %s", model_id)
+            return model_id
+        if not self.settings.qwen_use_modelscope:
+            logger.info("using Qwen model from Transformers source: %s", model_id)
+            return model_id
+
+        modelscope_id = self.settings.qwen_modelscope_model or model_id
+        try:
+            from modelscope import snapshot_download
+        except Exception as exc:
+            logger.warning(
+                "ModelScope is unavailable, using Transformers source %s: %s",
+                model_id,
+                exc,
+            )
+            return model_id
+
+        try:
+            kwargs: dict[str, Any] = {"model_id": modelscope_id}
+            if self.settings.qwen_cache_dir:
+                kwargs["cache_dir"] = self.settings.qwen_cache_dir
+            if self.settings.qwen_modelscope_revision:
+                kwargs["revision"] = self.settings.qwen_modelscope_revision
+            local_path = snapshot_download(**kwargs)
+            logger.info(
+                "downloaded/resolved Qwen model from ModelScope model_id=%s path=%s",
+                modelscope_id,
+                local_path,
+            )
+            return str(local_path)
+        except Exception as exc:
+            logger.exception(
+                "failed to download Qwen model from ModelScope model_id=%s, "
+                "using Transformers source %s: %s",
+                modelscope_id,
+                model_id,
+                exc,
+            )
+            return model_id
 
     def _analyze(self, frame: Any, detections: list[Detection]) -> QwenAnalysis:
         frame_id = id(frame)
