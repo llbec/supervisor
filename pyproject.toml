@@ -1,0 +1,9 @@
+[project]
+name = "supervisor-agent"
+version = "0.1.0"
+description = "Construction-site video supervision service."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
