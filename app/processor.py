@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.activity import TrajectoryBuffer
 from app.alerts import AlertPublisher
 from app.config import Settings
 from app.inference.base import FrameContext
@@ -13,6 +14,7 @@ from app.inference.qwen import VisionLanguageVerifier
 from app.inference.yolo import YoloDetector
 from app.models import AlertEvent, DetectionEvent, VideoJob
 from app.rules import Finding, summarize_frame
+from app.scene import SceneSampler
 from app.tracking import PPETracker
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,8 @@ class VideoProcessor:
         self.verifier = VisionLanguageVerifier(settings)
         self.publisher = AlertPublisher(settings)
         self.ppe_tracker = PPETracker(settings)
+        self.scene_sampler = SceneSampler(settings)
+        self.trajectory_buffer = TrajectoryBuffer(settings)
 
     def process_job(self, db: Session, job_id: int) -> None:
         job = db.get(VideoJob, job_id)
@@ -40,7 +44,7 @@ class VideoProcessor:
             job.source,
         )
         job.status = "running"
-        job.started_at = datetime.utcnow()
+        job.started_at = datetime.now()
         db.commit()
 
         try:
@@ -49,12 +53,12 @@ class VideoProcessor:
             logger.exception("job %s failed: %s", job.id, exc)
             job.status = "failed"
             job.error = str(exc)
-            job.finished_at = datetime.utcnow()
+            job.finished_at = datetime.now()
             db.commit()
             return
 
         job.status = "completed" if job.source_type == "offline" else "running"
-        job.finished_at = datetime.utcnow() if job.source_type == "offline" else None
+        job.finished_at = datetime.now() if job.source_type == "offline" else None
         db.commit()
         logger.info("job %s finished status=%s", job.id, job.status)
 
@@ -101,10 +105,60 @@ class VideoProcessor:
 
     def _process_frame(self, db: Session, job: VideoJob, frame, context: FrameContext) -> None:
         detections = self.detector.detect(frame)
-        ppe_summary = self.ppe_tracker.update(detections, context.frame_index)
-        scene = self.verifier.classify_scene(frame, detections)
-        briefing = self.verifier.confirm_briefing(frame, detections)
-        height_work = self.verifier.confirm_height_work(frame, detections)
+        ppe_summary = self.ppe_tracker.update(
+            detections,
+            context.frame_index,
+            frame_width=context.width,
+            frame_height=context.height,
+        )
+        activity_context = self.trajectory_buffer.update(context, detections)
+
+        scene = ("unknown", 0.0)
+        scene_snapshot = None
+        scene_candidate = self.scene_sampler.update(context, detections)
+        if scene_candidate is not None:
+            scene_snapshot = self._save_snapshot(job, frame, context, "scene")
+            scene_label, scene_confidence, scene_reason = self.verifier.analyze_scene(
+                frame, detections, scene_candidate.signature
+            )
+            scene = (scene_label, scene_confidence)
+            logger.info(
+                "job %s scene candidate frame=%s signature=%s result=%s conf=%.3f reason=%s",
+                job.id,
+                context.frame_index,
+                scene_candidate.signature,
+                scene_label,
+                scene_confidence,
+                scene_reason,
+            )
+
+        briefing = (False, 0.0)
+        height_work = (False, 0.0)
+        activity_snapshot = None
+        activity_reason = None
+        if self.trajectory_buffer.should_analyze(context.timestamp_ms):
+            track_analysis = self.verifier.analyze_tracks(
+                frame,
+                detections,
+                self.trajectory_buffer.summary(),
+            )
+            if track_analysis.height_work or track_analysis.briefing:
+                activity_snapshot = self._save_snapshot(job, frame, context, "activity")
+            height_work = (
+                track_analysis.height_work,
+                track_analysis.height_work_confidence,
+            )
+            briefing = (track_analysis.briefing, track_analysis.briefing_confidence)
+            activity_reason = track_analysis.reason
+            logger.info(
+                "job %s activity analysis frame=%s height_work=%s briefing=%s reason=%s",
+                job.id,
+                context.frame_index,
+                height_work,
+                briefing,
+                activity_reason,
+            )
+
         logger.debug(
             "job %s frame=%s detections=%s scene=%s briefing=%s height_work=%s ppe=%s",
             job.id,
@@ -116,10 +170,33 @@ class VideoProcessor:
             ppe_summary,
         )
         for finding in summarize_frame(
-            context, detections, scene, briefing, height_work, ppe_summary
+            context,
+            detections,
+            scene,
+            briefing,
+            height_work,
+            ppe_summary,
+            activity_context,
+            scene_snapshot,
+            activity_snapshot,
+            activity_reason,
         ):
             self._store_finding(db, job, finding)
         db.commit()
+
+    def _save_snapshot(
+        self, job: VideoJob, frame, context: FrameContext, category: str
+    ) -> str | None:
+        import cv2
+
+        output_dir = Path(self.settings.snapshot_dir) / f"job_{job.id}" / category
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{context.timestamp_ms}_{context.frame_index}.jpg"
+        ok = cv2.imwrite(str(path), frame)
+        if not ok:
+            logger.warning("failed to save snapshot: %s", path)
+            return None
+        return str(path)
 
     def _store_finding(self, db: Session, job: VideoJob, finding: Finding) -> None:
         event = DetectionEvent(

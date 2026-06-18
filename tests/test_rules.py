@@ -8,6 +8,7 @@ from app.tracking import PPETracker
 class _Settings:
     ppe_required_hits = 1
     ppe_missing_tolerance = 0
+    ppe_edge_margin_ratio = 0.03
     tracker_iou_threshold = 0.25
     frame_sample_interval = 15
 

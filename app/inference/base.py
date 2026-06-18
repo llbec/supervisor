@@ -20,3 +20,11 @@ class FrameContext:
     timestamp_ms: int
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class PoseObservation:
+    track_id: int | None
+    bbox: tuple[float, float, float, float] | None
+    keypoints: list[tuple[float, float, float]]
+    confidence: float

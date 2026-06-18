@@ -4,13 +4,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from app.inference.base import Detection
-from app.rules import HELMET_LABELS, VEST_LABELS
+from app.labels import HELMET_LABELS, PERSON_LABELS, VEST_LABELS
 
 if TYPE_CHECKING:
     from app.config import Settings
-
-
-PERSON_LABELS = {"person", "worker"}
 
 
 @dataclass
@@ -22,6 +19,9 @@ class PersonPPEState:
     vest_hits: int = 0
     missing_frames: int = 0
     last_frame_index: int = 0
+    helmet_exempt: bool = False
+    vest_exempt: bool = False
+    exemption_reasons: list[str] = field(default_factory=list)
 
     @property
     def helmet_ok(self) -> bool:
@@ -40,6 +40,7 @@ class PPESummary:
     missing_helmet: bool
     missing_vest: bool
     tracked_people: list[dict] = field(default_factory=list)
+    exempt_people: list[dict] = field(default_factory=list)
 
 
 class PPETracker:
@@ -50,7 +51,13 @@ class PPETracker:
         self.states: dict[int, PersonPPEState] = {}
         self._next_id = 1
 
-    def update(self, detections: list[Detection], frame_index: int) -> PPESummary:
+    def update(
+        self,
+        detections: list[Detection],
+        frame_index: int,
+        frame_width: int | None = None,
+        frame_height: int | None = None,
+    ) -> PPESummary:
         person_detections = [
             detection
             for detection in detections
@@ -78,13 +85,24 @@ class PPETracker:
             state.bbox = person.bbox
             state.seen_frames += 1
             state.last_frame_index = frame_index
+            exemptions = _ppe_exemptions(
+                person.bbox,
+                frame_width,
+                frame_height,
+                self.settings.ppe_edge_margin_ratio,
+            )
+            state.helmet_exempt = "helmet" in exemptions
+            state.vest_exempt = "vest" in exemptions
+            state.exemption_reasons = exemptions
 
             if _has_helmet(person.bbox, helmet_boxes):
                 state.helmet_hits += 1
             if _has_vest(person.bbox, vest_boxes):
                 state.vest_hits += 1
 
-            if not state.helmet_ok or not state.vest_ok:
+            if (not state.helmet_ok and not state.helmet_exempt) or (
+                not state.vest_ok and not state.vest_exempt
+            ):
                 state.missing_frames += 1
             else:
                 state.missing_frames = 0
@@ -102,11 +120,13 @@ class PPETracker:
         people_for_decision = confirmed_states or visible_states
         missing_helmet = any(
             not state.helmet_ok
+            and not state.helmet_exempt
             and state.missing_frames > self.settings.ppe_missing_tolerance
             for state in people_for_decision
         )
         missing_vest = any(
             not state.vest_ok
+            and not state.vest_exempt
             and state.missing_frames > self.settings.ppe_missing_tolerance
             for state in people_for_decision
         )
@@ -124,8 +144,21 @@ class PPETracker:
                     "helmet_hits": state.helmet_hits,
                     "vest_hits": state.vest_hits,
                     "missing_frames": state.missing_frames,
+                    "helmet_exempt": state.helmet_exempt,
+                    "vest_exempt": state.vest_exempt,
+                    "exemption_reasons": state.exemption_reasons,
                 }
                 for state in visible_states
+            ],
+            exempt_people=[
+                {
+                    "track_id": state.track_id,
+                    "helmet_exempt": state.helmet_exempt,
+                    "vest_exempt": state.vest_exempt,
+                    "exemption_reasons": state.exemption_reasons,
+                }
+                for state in visible_states
+                if state.helmet_exempt or state.vest_exempt
             ],
         )
 
@@ -175,6 +208,33 @@ def _has_vest(
         py1 + (py2 - py1) * 0.8,
     )
     return any(_intersection_over_box(box, torso_region) > 0.2 for box in vest_boxes)
+
+
+def _ppe_exemptions(
+    person_box: tuple[float, float, float, float],
+    frame_width: int | None,
+    frame_height: int | None,
+    edge_margin_ratio: float,
+) -> list[str]:
+    if not frame_width or not frame_height:
+        return []
+    x1, y1, x2, y2 = person_box
+    margin_x = frame_width * edge_margin_ratio
+    margin_y = frame_height * edge_margin_ratio
+    reasons = []
+    touches_left = x1 <= margin_x
+    touches_right = x2 >= frame_width - margin_x
+    touches_top = y1 <= margin_y
+    touches_bottom = y2 >= frame_height - margin_y
+    if touches_top:
+        reasons.extend(["helmet", "head_out_of_frame_or_edge"])
+    if touches_left or touches_right:
+        reasons.extend(["helmet", "vest", "body_partially_out_of_frame"])
+    if touches_bottom:
+        reasons.extend(["vest", "body_occluded_or_out_of_frame"])
+    if (x2 - x1) < frame_width * 0.025 or (y2 - y1) < frame_height * 0.08:
+        reasons.extend(["helmet", "vest", "person_too_small_or_occluded"])
+    return sorted(set(reasons))
 
 
 def _intersection_over_box(

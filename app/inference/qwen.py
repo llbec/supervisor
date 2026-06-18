@@ -23,6 +23,15 @@ class QwenAnalysis:
     height_work_confidence: float
 
 
+@dataclass(frozen=True)
+class TrackAnalysis:
+    height_work: bool
+    height_work_confidence: float
+    briefing: bool
+    briefing_confidence: float
+    reason: str
+
+
 class VisionLanguageVerifier:
     """Qwen-VL verifier with a conservative rule fallback."""
 
@@ -52,6 +61,76 @@ class VisionLanguageVerifier:
     def confirm_height_work(self, frame: Any, detections: list[Detection]) -> tuple[bool, float]:
         analysis = self._analyze(frame, detections)
         return analysis.height_work, analysis.height_work_confidence
+
+    def analyze_scene(
+        self, frame: Any, detections: list[Detection], signature: tuple[str, ...]
+    ) -> tuple[str, float, str]:
+        if not self.ready:
+            fallback = self._fallback_analysis(detections)
+            return fallback.scene, fallback.scene_confidence, "rule_fallback"
+        prompt = (
+            "你是工地施工视频场景分类模型。请根据图片和YOLO场景标签判断场景。"
+            "scene 只能是 machine_room、near_tower、other。"
+            "只输出JSON，格式："
+            '{"scene":"other","confidence":0.0,"reason":"简短原因"}'
+            f"\nYOLO场景标签：{list(signature)}"
+        )
+        try:
+            parsed = self._generate_json(frame, prompt)
+            return (
+                _normalize_scene(parsed.get("scene")),
+                _confidence(parsed.get("confidence")),
+                str(parsed.get("reason", "")),
+            )
+        except Exception as exc:
+            logger.exception("Qwen scene analysis failed, using rule fallback: %s", exc)
+            fallback = self._fallback_analysis(detections)
+            return fallback.scene, fallback.scene_confidence, "rule_fallback"
+
+    def analyze_tracks(
+        self,
+        frame: Any,
+        detections: list[Detection],
+        trajectory_summary: dict[str, Any],
+    ) -> TrackAnalysis:
+        if not self.ready:
+            fallback = self._fallback_analysis(detections)
+            return TrackAnalysis(
+                height_work=fallback.height_work,
+                height_work_confidence=fallback.height_work_confidence,
+                briefing=fallback.briefing,
+                briefing_confidence=fallback.briefing_confidence,
+                reason="rule_fallback",
+            )
+        prompt = (
+            "你是工地施工安全行为审核模型。请结合当前图片、人物轨迹和pose数据判断："
+            "1) height_work 是否存在登高作业；"
+            "2) briefing 是否存在一人对多人任务交底或安全事项强调。"
+            "只输出JSON，格式："
+            '{"height_work":false,"height_work_confidence":0.0,'
+            '"briefing":false,"briefing_confidence":0.0,"reason":"简短原因"}'
+            f"\n轨迹和pose数据：{trajectory_summary}"
+            f"\nYOLO检测标签：{_format_detections(detections)}"
+        )
+        try:
+            parsed = self._generate_json(frame, prompt)
+            return TrackAnalysis(
+                height_work=_bool(parsed.get("height_work")),
+                height_work_confidence=_confidence(parsed.get("height_work_confidence")),
+                briefing=_bool(parsed.get("briefing")),
+                briefing_confidence=_confidence(parsed.get("briefing_confidence")),
+                reason=str(parsed.get("reason", "")),
+            )
+        except Exception as exc:
+            logger.exception("Qwen track analysis failed, using rule fallback: %s", exc)
+            fallback = self._fallback_analysis(detections)
+            return TrackAnalysis(
+                height_work=fallback.height_work,
+                height_work_confidence=fallback.height_work_confidence,
+                briefing=fallback.briefing,
+                briefing_confidence=fallback.briefing_confidence,
+                reason="rule_fallback",
+            )
 
     def _load_qwen(self) -> None:
         try:
@@ -154,40 +233,8 @@ class VisionLanguageVerifier:
             '"height_work":false,"height_work_confidence":0.0}'
             f"\nYOLO检测标签：{labels}"
         )
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
-
         try:
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            inputs = self.processor(
-                text=[text],
-                images=[image],
-                padding=True,
-                return_tensors="pt",
-            )
-            if hasattr(inputs, "to") and hasattr(self.model, "device"):
-                inputs = inputs.to(self.model.device)
-            generated_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.settings.qwen_max_new_tokens,
-            )
-            input_length = inputs["input_ids"].shape[-1]
-            output_ids = generated_ids[:, input_length:]
-            output = self.processor.batch_decode(
-                output_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
-            parsed = _parse_json(output)
+            parsed = self._generate_json_from_image(image, prompt)
             return QwenAnalysis(
                 scene=_normalize_scene(parsed.get("scene")),
                 scene_confidence=_confidence(parsed.get("scene_confidence")),
@@ -199,6 +246,46 @@ class VisionLanguageVerifier:
         except Exception as exc:
             logger.exception("Qwen-VL inference failed, using rule fallback: %s", exc)
             return self._fallback_analysis(detections)
+
+    def _generate_json(self, frame: Any, prompt: str) -> dict[str, Any]:
+        image = _frame_to_pil(frame)
+        return self._generate_json_from_image(image, prompt)
+
+    def _generate_json_from_image(self, image: Any, prompt: str) -> dict[str, Any]:
+        assert self.processor is not None
+        assert self.model is not None
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.processor(
+            text=[text],
+            images=[image],
+            padding=True,
+            return_tensors="pt",
+        )
+        if hasattr(inputs, "to") and hasattr(self.model, "device"):
+            inputs = inputs.to(self.model.device)
+        generated_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=self.settings.qwen_max_new_tokens,
+        )
+        input_length = inputs["input_ids"].shape[-1]
+        output_ids = generated_ids[:, input_length:]
+        output = self.processor.batch_decode(
+            output_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        return _parse_json(output)
 
     def _fallback_analysis(self, detections: list[Detection]) -> QwenAnalysis:
         labels = {d.label for d in detections}

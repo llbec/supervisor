@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     frame_sample_interval: int = Field(default=15, ge=1)
     alert_webhook_url: str | None = None
     log_level: str = "INFO"
+    snapshot_dir: str = "data/snapshots"
 
     yolo_seg_model: str = "weights/yoloe-26l-seg.pt"
     yolo_pose_model: str = "weights/yolo26l-pose.pt"
@@ -32,6 +33,10 @@ class Settings(BaseSettings):
     tracker_iou_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     ppe_required_hits: int = Field(default=2, ge=1)
     ppe_missing_tolerance: int = Field(default=2, ge=0)
+    ppe_edge_margin_ratio: float = Field(default=0.03, ge=0.0, le=0.2)
+    scene_min_change_interval_ms: int = Field(default=10_000, ge=0)
+    activity_analysis_interval_ms: int = Field(default=5_000, ge=1000)
+    trajectory_window_ms: int = Field(default=30_000, ge=5000)
     realtime_alert_labels: set[str] = {"ppe_violation", "smoking", "hot_work"}
 
     @property

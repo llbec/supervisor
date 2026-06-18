@@ -46,19 +46,27 @@
 
 ## 实现架构
 
-原始思路是“YOLO 实时识别 -> 跟踪筛选 -> 大模型确认 -> 重点项直接上报告警”。实现时做了两点优化：
+当前流程调整为“YOLO 先筛选和聚合，Qwen3-VL 只确认关键帧和轨迹窗口”：
 
-- 将“检测、人员/PPE 跟踪关联、视觉语言确认、规则归并、告警推送、数据库写入”拆成独立模块。
-- 离线视频和视频流共用同一条处理链路；视频流任务保留实时告警能力，离线视频任务处理完成后标记为 `completed`。
-- PPE 检测不再只按单帧数量判断，而是优先使用 ByteTrack / DeepSORT track_id，并用内置 IoU 跟踪回退，把安全帽、反光衣与人员目标进行多帧稳定关联。
+1. 使用 YOLO 检测视频中的场景相关目标，生成场景标签签名；当签名发生变化时，抽取一帧截图交给 Qwen3-VL 判断真实场景。
+2. 使用 YOLO 检测人物、安全帽、反光衣、香烟、动火目标。
+3. 使用 YOLO pose 提取人物关键点，和人物 track_id 一起写入轨迹窗口。
+4. PPE 判断使用人物、安全帽、反光衣的数量和位置关系，并结合多帧 track 状态；如果人物头部/身体位于画面边缘、头部或身体出镜、身体被遮挡、目标过小等，会记录为例外，不直接判违规。
+5. 抽烟判断需要同时出现香烟/烟雾目标和“手靠近面部”等 pose 动作候选。
+6. 动火判断需要同时出现火焰/火星/焊接/切割等目标和对应作业动作候选。
+7. 人物轨迹和 pose 数据按时间窗口提交给 Qwen3-VL，判断是否存在登高作业和交底场景；如果判定存在，会按时间保存场景截图，并把截图路径写入事件详情。
+
+离线视频和视频流共用同一条处理链路；视频流任务保留实时告警能力，离线视频任务处理完成后标记为 `completed`。
 
 主要模块：
 
 - `app/api.py`：FastAPI 接口，提交离线视频/视频流任务，查询任务、事件和告警。
 - `app/processor.py`：打开视频源、抽帧、调用模型、入库。
 - `app/inference/yolo.py`：Ultralytics YOLO 适配器，自动加载 `weights/yoloe-26l-seg.pt` 和 `weights/yolo26n-pose.pt`。
+- `app/scene.py`：根据 YOLO 检测结果判断场景签名是否变化，并选择代表帧。
+- `app/activity.py`：维护人物轨迹和 pose 窗口，生成抽烟/动火动作候选，并向 Qwen3-VL 提供轨迹摘要。
 - `app/tracking.py`：人员目标跟踪和 PPE 关联，降低安全帽/反光衣误报。
-- `app/inference/qwen.py`：Qwen3-VL 确认接口，用于场景、交底行为、登高作业二次确认。
+- `app/inference/qwen.py`：Qwen3-VL 确认接口，用于场景关键帧、交底行为、登高作业二次确认。
 - `app/rules.py`：将检测结果归并为六类业务事件，并对 PPE、抽烟、动火生成告警。
 - `app/models.py`：数据库表结构。
 
@@ -88,6 +96,7 @@ weights/mobilenetv3.pth
 ```bash
 export SUPERVISOR_DATABASE_URL='sqlite:///./data/supervisor.db'
 export SUPERVISOR_FRAME_SAMPLE_INTERVAL=15
+export SUPERVISOR_SNAPSHOT_DIR='data/snapshots'
 export SUPERVISOR_YOLO_SEG_MODEL='weights/yoloe-26l-seg.pt'
 export SUPERVISOR_YOLO_POSE_MODEL='weights/yolo26n-pose.pt'
 export SUPERVISOR_QWEN_MODEL='Qwen/Qwen3-VL-8B-Instruct'
@@ -98,6 +107,10 @@ export SUPERVISOR_QWEN_CACHE_DIR='data/modelscope'
 export SUPERVISOR_TRACKER_BACKEND='bytetrack'
 export SUPERVISOR_PPE_REQUIRED_HITS=2
 export SUPERVISOR_PPE_MISSING_TOLERANCE=2
+export SUPERVISOR_PPE_EDGE_MARGIN_RATIO=0.03
+export SUPERVISOR_SCENE_MIN_CHANGE_INTERVAL_MS=10000
+export SUPERVISOR_ACTIVITY_ANALYSIS_INTERVAL_MS=5000
+export SUPERVISOR_TRAJECTORY_WINDOW_MS=30000
 export SUPERVISOR_LOG_LEVEL='INFO'
 export SUPERVISOR_ALERT_WEBHOOK_URL='http://127.0.0.1:9000/alerts'
 ```
@@ -152,8 +165,16 @@ python -m app.cli /data/videos/site.mp4 --camera-id camera-001
 - `detection_events`：识别事件，包含事件类型、值、置信度、视频时间戳、帧号和详细信息。
 - `alert_events`：实时告警，包含告警类型、等级、消息和上下文。
 
+截图默认保存到 `data/snapshots/job_{job_id}/`：
+
+- `scene/`：YOLO 场景签名变化时抽取的 Qwen3-VL 场景确认图。
+- `activity/`：Qwen3-VL 判定存在登高作业或交底场景时保存的关键图。
+
+截图路径会写入 `detection_events.details.snapshot_path`，便于前端回放和人工复核。
+
 ## 后续可增强项
 
 - 接入 MobileNetV3 做抽烟/明火小目标二分类复核。
 - 将视频流任务改为独立 worker 或队列消费，支持多路摄像头长期运行。
 - 将 Qwen3-VL 推理结果缓存到帧级中间表，便于复核和调参。
+- 将 PPE 遮挡例外从几何规则升级为分割 mask / 深度估计辅助判断。

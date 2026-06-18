@@ -66,7 +66,8 @@ class YoloDetector:
                 boxes = getattr(result, "boxes", None)
                 if boxes is None:
                     continue
-                for box in boxes:
+                keypoints = getattr(result, "keypoints", None)
+                for box_index, box in enumerate(boxes):
                     cls_id = int(box.cls[0])
                     label = str(names.get(cls_id, cls_id)).lower().replace(" ", "_")
                     confidence = float(box.conf[0])
@@ -74,6 +75,15 @@ class YoloDetector:
                     track_id = None
                     if getattr(box, "id", None) is not None:
                         track_id = int(box.id[0])
+                    metadata: dict[str, Any] = {}
+                    if keypoints is not None and getattr(keypoints, "data", None) is not None:
+                        try:
+                            metadata["keypoints"] = [
+                                tuple(float(v) for v in point[:3])
+                                for point in keypoints.data[box_index].tolist()
+                            ]
+                        except Exception:
+                            metadata["keypoints"] = []
                     detections.append(
                         Detection(
                             label=label,
@@ -81,6 +91,7 @@ class YoloDetector:
                             bbox=xyxy,
                             track_id=track_id,
                             source=f"yolo_{kind}",
+                            metadata=metadata,
                         )
                     )
         if self.settings.tracker_backend.lower() == "deepsort":

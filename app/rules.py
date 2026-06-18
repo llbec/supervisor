@@ -1,24 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.inference.base import Detection, FrameContext
-
-
-HELMET_LABELS = {"helmet", "hardhat", "safety_helmet", "head_helmet"}
-VEST_LABELS = {"vest", "safety_vest", "reflective_vest", "hi_vis_vest"}
-SMOKING_LABELS = {"smoke", "smoking", "cigarette"}
-HOT_WORK_LABELS = {
-    "fire",
-    "flame",
-    "spark",
-    "sparks",
-    "welding",
-    "welder",
-    "cutting",
-    "open_flame",
-}
+from app.labels import HELMET_LABELS, HOT_WORK_LABELS, SMOKING_LABELS, VEST_LABELS
 
 
 @dataclass(frozen=True)
@@ -40,6 +26,15 @@ class PPESummaryLike(Protocol):
     missing_helmet: bool
     missing_vest: bool
     tracked_people: list[dict]
+    exempt_people: list[dict]
+
+
+class ActivityContextLike(Protocol):
+    smoking_candidate: bool
+    smoking_confidence: float
+    hot_work_candidate: bool
+    hot_work_confidence: float
+    pose_summary: dict[str, Any]
 
 
 def summarize_frame(
@@ -49,31 +44,58 @@ def summarize_frame(
     briefing: tuple[bool, float],
     height_work: tuple[bool, float],
     ppe_summary: PPESummaryLike | None = None,
+    activity_context: ActivityContextLike | None = None,
+    scene_snapshot: str | None = None,
+    activity_snapshot: str | None = None,
+    activity_reason: str | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     labels = {d.label for d in detections}
 
-    findings.append(
-        Finding("scene", scene[0], scene[1], frame, {"labels": sorted(labels)})
-    )
-    findings.append(
-        Finding(
-            "height_work",
-            str(height_work[0]).lower(),
-            height_work[1],
-            frame,
-            {"labels": sorted(labels)},
+    if scene[0] != "unknown":
+        findings.append(
+            Finding(
+                "scene",
+                scene[0],
+                scene[1],
+                frame,
+                {"labels": sorted(labels), "snapshot_path": scene_snapshot},
+            )
         )
-    )
-    findings.append(
-        Finding(
-            "briefing",
-            str(briefing[0]).lower(),
-            briefing[1],
-            frame,
-            {"person_count": sum(1 for d in detections if d.label == "person")},
+    if height_work[1] > 0:
+        findings.append(
+            Finding(
+                "height_work",
+                str(height_work[0]).lower(),
+                height_work[1],
+                frame,
+                {
+                    "labels": sorted(labels),
+                    "snapshot_path": activity_snapshot if height_work[0] else None,
+                    "reason": activity_reason,
+                    "pose_summary": activity_context.pose_summary
+                    if activity_context is not None
+                    else {},
+                },
+            )
         )
-    )
+    if briefing[1] > 0:
+        findings.append(
+            Finding(
+                "briefing",
+                str(briefing[0]).lower(),
+                briefing[1],
+                frame,
+                {
+                    "person_count": sum(1 for d in detections if d.label == "person"),
+                    "snapshot_path": activity_snapshot if briefing[0] else None,
+                    "reason": activity_reason,
+                    "pose_summary": activity_context.pose_summary
+                    if activity_context is not None
+                    else {},
+                },
+            )
+        )
 
     person_count = (
         ppe_summary.person_count
@@ -117,6 +139,9 @@ def summarize_frame(
                     "tracked_people": ppe_summary.tracked_people
                     if ppe_summary is not None
                     else [],
+                    "exempt_people": ppe_summary.exempt_people
+                    if ppe_summary is not None
+                    else [],
                 },
                 alert=not ppe_ok,
                 severity="warning",
@@ -124,28 +149,50 @@ def summarize_frame(
             )
         )
 
-    if labels & SMOKING_LABELS:
+    smoking_detected = bool(labels & SMOKING_LABELS)
+    smoking_action = (
+        activity_context.smoking_candidate if activity_context is not None else True
+    )
+    if smoking_detected and smoking_action:
         findings.append(
             Finding(
                 "smoking",
                 "detected",
-                _max_confidence(detections, SMOKING_LABELS),
+                activity_context.smoking_confidence
+                if activity_context is not None
+                else _max_confidence(detections, SMOKING_LABELS),
                 frame,
-                {"matched_labels": sorted(labels & SMOKING_LABELS)},
+                {
+                    "matched_labels": sorted(labels & SMOKING_LABELS),
+                    "pose_summary": activity_context.pose_summary
+                    if activity_context is not None
+                    else {},
+                },
                 alert=True,
                 severity="critical",
                 message="Detected smoking behavior in construction area.",
             )
         )
 
-    if labels & HOT_WORK_LABELS:
+    hot_work_detected = bool(labels & HOT_WORK_LABELS)
+    hot_work_action = (
+        activity_context.hot_work_candidate if activity_context is not None else True
+    )
+    if hot_work_detected and hot_work_action:
         findings.append(
             Finding(
                 "hot_work",
                 "detected",
-                _max_confidence(detections, HOT_WORK_LABELS),
+                activity_context.hot_work_confidence
+                if activity_context is not None
+                else _max_confidence(detections, HOT_WORK_LABELS),
                 frame,
-                {"matched_labels": sorted(labels & HOT_WORK_LABELS)},
+                {
+                    "matched_labels": sorted(labels & HOT_WORK_LABELS),
+                    "pose_summary": activity_context.pose_summary
+                    if activity_context is not None
+                    else {},
+                },
                 alert=True,
                 severity="critical",
                 message="Detected hot work, sparks, flame, welding, or cutting.",
