@@ -46,15 +46,15 @@
 
 ## 实现架构
 
-当前流程调整为“YOLO 先筛选和聚合，Qwen3-VL 只确认关键帧和轨迹窗口”：
+当前流程调整为“YOLO 先完整处理视频，Qwen3-VL 后置综合判断”：
 
-1. 使用 YOLO 检测视频中的场景相关目标，生成场景标签签名；当签名发生变化时，抽取一帧截图交给 Qwen3-VL 判断真实场景。
+1. 使用 YOLO 检测视频中的场景相关目标，生成场景标签签名；处理完整个视频后，只选取一张代表场景帧。
 2. 使用 YOLO 检测人物、安全帽、反光衣、香烟、动火目标。
-3. 使用 YOLO pose 提取人物关键点，和人物 track_id 一起写入轨迹窗口。
+3. 使用 YOLO pose 提取人物关键点，和人物 track_id 一起写入轨迹缓存。
 4. PPE 判断使用人物、安全帽、反光衣的数量和位置关系，并结合多帧 track 状态；如果人物头部/身体位于画面边缘、头部或身体出镜、身体被遮挡、目标过小等，会记录为例外，不直接判违规。
 5. 抽烟判断需要同时出现香烟/烟雾目标和“手靠近面部”等 pose 动作候选。
 6. 动火判断需要同时出现火焰/火星/焊接/切割等目标和对应作业动作候选。
-7. 人物轨迹和 pose 数据按时间窗口提交给 Qwen3-VL，判断是否存在登高作业和交底场景；如果判定存在，会按时间保存场景截图，并把截图路径写入事件详情。
+7. YOLO 全部处理完成后，将一张代表场景帧、筛选后的检测统计、PPE 异常候选、抽烟/动火候选、人物轨迹和 pose 摘要一次性交给 Qwen3-VL，判断场景、是否有登高作业、是否有交底场景。
 
 离线视频和视频流共用同一条处理链路；视频流任务保留实时告警能力，离线视频任务处理完成后标记为 `completed`。
 
@@ -63,10 +63,10 @@
 - `app/api.py`：FastAPI 接口，提交离线视频/视频流任务，查询任务、事件和告警。
 - `app/processor.py`：打开视频源、抽帧、调用模型、入库。
 - `app/inference/yolo.py`：Ultralytics YOLO 适配器，自动加载 `weights/yoloe-26l-seg.pt` 和 `weights/yolo26n-pose.pt`。
-- `app/scene.py`：根据 YOLO 检测结果判断场景签名是否变化，并选择代表帧。
-- `app/activity.py`：维护人物轨迹和 pose 窗口，生成抽烟/动火动作候选，并向 Qwen3-VL 提供轨迹摘要。
+- `app/scene.py`：根据 YOLO 检测结果判断场景签名是否变化，为最终代表帧和摘要提供依据。
+- `app/activity.py`：维护人物轨迹和 pose 缓存，生成抽烟/动火动作候选，并为最终 Qwen3-VL 分析提供轨迹摘要。
 - `app/tracking.py`：人员目标跟踪和 PPE 关联，降低安全帽/反光衣误报。
-- `app/inference/qwen.py`：Qwen3-VL 确认接口，用于场景关键帧、交底行为、登高作业二次确认。
+- `app/inference/qwen.py`：Qwen3-VL 确认接口，用一张代表场景帧和 YOLO 汇总结果做场景、交底、登高作业综合判断。
 - `app/rules.py`：将检测结果归并为六类业务事件，并对 PPE、抽烟、动火生成告警。
 - `app/models.py`：数据库表结构。
 
@@ -167,8 +167,7 @@ python -m app.cli /data/videos/site.mp4 --camera-id camera-001
 
 截图默认保存到 `data/snapshots/job_{job_id}/`：
 
-- `scene/`：YOLO 场景签名变化时抽取的 Qwen3-VL 场景确认图。
-- `activity/`：Qwen3-VL 判定存在登高作业或交底场景时保存的关键图。
+- `scene/`：YOLO 全量处理后选出的代表场景帧，也是提交给 Qwen3-VL 的图片。
 
 截图路径会写入 `detection_events.details.snapshot_path`，便于前端回放和人工复核。
 

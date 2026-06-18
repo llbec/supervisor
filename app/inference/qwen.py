@@ -32,6 +32,17 @@ class TrackAnalysis:
     reason: str
 
 
+@dataclass(frozen=True)
+class VideoSummaryAnalysis:
+    scene: str
+    scene_confidence: float
+    height_work: bool
+    height_work_confidence: float
+    briefing: bool
+    briefing_confidence: float
+    reason: str
+
+
 class VisionLanguageVerifier:
     """Qwen-VL verifier with a conservative rule fallback."""
 
@@ -125,6 +136,64 @@ class VisionLanguageVerifier:
             logger.exception("Qwen track analysis failed, using rule fallback: %s", exc)
             fallback = self._fallback_analysis(detections)
             return TrackAnalysis(
+                height_work=fallback.height_work,
+                height_work_confidence=fallback.height_work_confidence,
+                briefing=fallback.briefing,
+                briefing_confidence=fallback.briefing_confidence,
+                reason="rule_fallback",
+            )
+
+    def analyze_video_summary(
+        self,
+        scene_frame: Any,
+        summary: dict[str, Any],
+        representative_detections: list[Detection],
+    ) -> VideoSummaryAnalysis:
+        if not self.ready:
+            fallback = self._fallback_analysis(representative_detections)
+            return VideoSummaryAnalysis(
+                scene=fallback.scene,
+                scene_confidence=fallback.scene_confidence,
+                height_work=fallback.height_work,
+                height_work_confidence=fallback.height_work_confidence,
+                briefing=fallback.briefing,
+                briefing_confidence=fallback.briefing_confidence,
+                reason="rule_fallback",
+            )
+
+        prompt = (
+            "你是工地施工安全视频审核模型。YOLO和pose已经处理完整个视频，"
+            "现在给你一张代表场景帧，以及筛选后的检测、告警候选、人物轨迹和pose摘要。"
+            "请综合判断："
+            "1) scene 只能是 machine_room、near_tower、other；"
+            "2) height_work 是否存在登高作业；"
+            "3) briefing 是否存在一人对多人任务交底或安全事项强调。"
+            "只输出JSON，不要解释。格式："
+            '{"scene":"other","scene_confidence":0.0,'
+            '"height_work":false,"height_work_confidence":0.0,'
+            '"briefing":false,"briefing_confidence":0.0,'
+            '"reason":"简短原因"}'
+            f"\n筛选后的YOLO/pose摘要：{summary}"
+        )
+        try:
+            parsed = self._generate_json(scene_frame, prompt)
+            return VideoSummaryAnalysis(
+                scene=_normalize_scene(parsed.get("scene")),
+                scene_confidence=_confidence(parsed.get("scene_confidence")),
+                height_work=_bool(parsed.get("height_work")),
+                height_work_confidence=_confidence(parsed.get("height_work_confidence")),
+                briefing=_bool(parsed.get("briefing")),
+                briefing_confidence=_confidence(parsed.get("briefing_confidence")),
+                reason=str(parsed.get("reason", "")),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Qwen video summary analysis failed, using rule fallback: %s", exc
+            )
+            fallback = self._fallback_analysis(representative_detections)
+            return VideoSummaryAnalysis(
+                scene=fallback.scene,
+                scene_confidence=fallback.scene_confidence,
                 height_work=fallback.height_work,
                 height_work_confidence=fallback.height_work_confidence,
                 briefing=fallback.briefing,
@@ -285,6 +354,7 @@ class VisionLanguageVerifier:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0]
+        logger.debug("Qwen-VL output: %s", output)
         return _parse_json(output)
 
     def _fallback_analysis(self, detections: list[Detection]) -> QwenAnalysis:
