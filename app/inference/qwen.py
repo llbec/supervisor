@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import base64
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from app.config import Settings
 from app.inference.base import Detection
@@ -50,16 +54,24 @@ class VisionLanguageVerifier:
         self.settings = settings
         self.processor: Any | None = None
         self.model: Any | None = None
+        self.remote_client: RemoteMultimodalClient | None = None
         self._last_frame_id: int | None = None
         self._last_analysis: QwenAnalysis | None = None
-        if settings.qwen_enabled:
+        if not settings.qwen_enabled:
+            logger.info("multimodal verifier disabled by configuration")
+        elif settings.multimodal_provider == "local":
             self._load_qwen()
         else:
-            logger.info("Qwen verifier disabled by configuration")
+            self.remote_client = RemoteMultimodalClient(settings)
 
     @property
     def ready(self) -> bool:
-        return self.processor is not None and self.model is not None
+        return (
+            self.remote_client is not None
+            and self.remote_client.ready
+            or self.processor is not None
+            and self.model is not None
+        )
 
     def classify_scene(self, frame: Any, detections: list[Detection]) -> tuple[str, float]:
         analysis = self._analyze(frame, detections)
@@ -317,10 +329,14 @@ class VisionLanguageVerifier:
             return self._fallback_analysis(detections)
 
     def _generate_json(self, frame: Any, prompt: str) -> dict[str, Any]:
+        if self.remote_client is not None and self.remote_client.ready:
+            return self.remote_client.generate_json(frame, prompt)
         image = _frame_to_pil(frame)
         return self._generate_json_from_image(image, prompt)
 
     def _generate_json_from_image(self, image: Any, prompt: str) -> dict[str, Any]:
+        if self.remote_client is not None and self.remote_client.ready:
+            return self.remote_client.generate_json_from_image(image, prompt)
         assert self.processor is not None
         assert self.model is not None
         messages = [
@@ -384,6 +400,90 @@ class VisionLanguageVerifier:
         )
 
 
+class RemoteMultimodalClient:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.url = settings.multimodal_api_url
+        self.model = settings.multimodal_model or settings.qwen_model
+        self.format = settings.multimodal_api_format.lower()
+        if not self.url:
+            logger.warning(
+                "multimodal provider is remote but SUPERVISOR_MULTIMODAL_API_URL is empty; "
+                "using rule fallback"
+            )
+        else:
+            logger.info(
+                "using remote multimodal service url=%s format=%s model=%s",
+                self.url,
+                self.format,
+                self.model,
+            )
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.url)
+
+    def generate_json(self, frame: Any, prompt: str) -> dict[str, Any]:
+        image_data_url = _frame_to_jpeg_data_url(frame)
+        return self._post(prompt, image_data_url)
+
+    def generate_json_from_image(self, image: Any, prompt: str) -> dict[str, Any]:
+        image_data_url = _pil_to_jpeg_data_url(image)
+        return self._post(prompt, image_data_url)
+
+    def _post(self, prompt: str, image_data_url: str) -> dict[str, Any]:
+        assert self.url is not None
+        headers = {"Content-Type": "application/json"}
+        if self.settings.multimodal_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.multimodal_api_key}"
+
+        payload = (
+            self._openai_compatible_payload(prompt, image_data_url)
+            if self.format == "openai_compatible"
+            else self._custom_payload(prompt, image_data_url)
+        )
+        response = httpx.post(
+            self.url,
+            json=payload,
+            headers=headers,
+            timeout=self.settings.multimodal_api_timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        logger.debug("remote multimodal response: %s", data)
+        return _extract_json_payload(data)
+
+    def _custom_payload(self, prompt: str, image_data_url: str) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "prompt": prompt,
+            "image": image_data_url,
+            "image_base64": image_data_url.split(",", 1)[1],
+            "image_mime_type": "image/jpeg",
+            "response_format": "json",
+        }
+
+    def _openai_compatible_payload(
+        self, prompt: str, image_data_url: str
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": image_data_url},
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+        }
+
+
 def _frame_to_pil(frame: Any) -> Any:
     from PIL import Image
 
@@ -394,6 +494,26 @@ def _frame_to_pil(frame: Any) -> Any:
     except Exception:
         pass
     return Image.fromarray(frame)
+
+
+def _frame_to_jpeg_data_url(frame: Any) -> str:
+    try:
+        import cv2
+
+        ok, buffer = cv2.imencode(".jpg", frame)
+        if ok:
+            encoded = base64.b64encode(buffer.tobytes()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        pass
+    return _pil_to_jpeg_data_url(_frame_to_pil(frame))
+
+
+def _pil_to_jpeg_data_url(image: Any) -> str:
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
 
 
 def _format_detections(detections: list[Detection]) -> list[dict[str, Any]]:
@@ -413,6 +533,28 @@ def _parse_json(text: str) -> dict[str, Any]:
     if not match:
         raise ValueError(f"Qwen output is not JSON: {text}")
     return json.loads(match.group(0))
+
+
+def _extract_json_payload(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict):
+        for key in ("scene", "height_work", "briefing"):
+            if key in data:
+                return data
+        for key in ("json", "result", "output", "content", "text"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                return _parse_json(value)
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {})
+            content = message.get("content")
+            if isinstance(content, str):
+                return _parse_json(content)
+    if isinstance(data, str):
+        return _parse_json(data)
+    raise ValueError(f"cannot parse multimodal response as JSON: {data}")
 
 
 def _normalize_scene(value: Any) -> str:

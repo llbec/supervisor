@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     qwen_model: str = "Qwen/Qwen3-VL-8B-Instruct"
     mobilenet_model: str = "weights/mobilenetv3-large-1cd25616.pth"
     qwen_enabled: bool = True
+    multimodal_provider: str = "remote"
+    multimodal_api_url: str | None = None
+    multimodal_api_key: str | None = None
+    multimodal_api_format: str = "custom"
+    multimodal_api_timeout: float = Field(default=60.0, ge=1.0)
+    multimodal_model: str | None = None
     qwen_use_modelscope: bool = True
     qwen_modelscope_model: str | None = None
     qwen_modelscope_revision: str | None = None
