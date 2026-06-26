@@ -1,0 +1,37 @@
+services:
+  qwen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: supervisor-qwen:latest
+    container_name: supervisor-qwen
+    ports:
+      - "9001:9001"
+    environment:
+      QWEN_MODEL_NAME: "Qwen/Qwen3-VL-8B-Instruct"
+      QWEN_MODEL_PATH: ""
+      QWEN_USE_MODELSCOPE: "true"
+      QWEN_MODELSCOPE_CACHE_DIR: "/models/modelscope"
+      QWEN_HF_CACHE_DIR: "/models/huggingface"
+      QWEN_DEVICE_MAP: "auto"
+      QWEN_MAX_NEW_TOKENS: "512"
+      QWEN_API_KEY: "change-me"
+      QWEN_MOCK_MODE: "false"
+      QWEN_LOAD_ON_STARTUP: "true"
+      QWEN_LOG_LEVEL: "INFO"
+    volumes:
+      - ./data/modelscope:/models/modelscope
+      - ./data/huggingface:/models/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s

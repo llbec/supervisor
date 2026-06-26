@@ -17,7 +17,7 @@ class VideoJob(Base):
     camera_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -41,7 +41,7 @@ class DetectionEvent(Base):
     timestamp_ms: Mapped[int] = mapped_column(Integer, index=True)
     frame_index: Mapped[int] = mapped_column(Integer)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     job: Mapped[VideoJob] = relationship(back_populates="events")
 
@@ -58,6 +58,6 @@ class AlertEvent(Base):
     timestamp_ms: Mapped[int] = mapped_column(Integer, index=True)
     frame_index: Mapped[int] = mapped_column(Integer)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     job: Mapped[VideoJob] = relationship(back_populates="alerts")

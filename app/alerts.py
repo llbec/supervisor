@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from app.config import Settings
 from app.models import AlertEvent
+
+logger = logging.getLogger(__name__)
 
 
 class AlertPublisher:
@@ -26,5 +30,5 @@ class AlertPublisher:
         }
         try:
             httpx.post(self.settings.alert_webhook_url, json=payload, timeout=3.0)
-        except httpx.HTTPError:
-            return
+        except httpx.HTTPError as exc:
+            logger.warning("alert webhook failed: %s", exc)

@@ -5,9 +5,3 @@ pydantic-settings
 httpx
 opencv-python
 ultralytics
-transformers
-accelerate
-torch
-Pillow
-deep-sort-realtime
-modelscope

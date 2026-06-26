@@ -5,7 +5,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db import get_db, init_db
+from app.db import SessionLocal, get_db, init_db
 from app.logging_config import configure_logging
 from app.models import AlertEvent, DetectionEvent, VideoJob
 from app.processor import VideoProcessor
@@ -27,8 +27,6 @@ def startup() -> None:
 
 
 def run_job(job_id: int) -> None:
-    from app.db import SessionLocal
-
     db = SessionLocal()
     try:
         VideoProcessor(get_settings()).process_job(db, job_id)

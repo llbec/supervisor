@@ -10,7 +10,8 @@ from app.processor import VideoProcessor
 
 
 def main() -> None:
-    configure_logging(get_settings().log_level)
+    settings = get_settings()
+    configure_logging(settings.log_level)
     parser = argparse.ArgumentParser(description="Process one construction-site video.")
     parser.add_argument("source", help="Local video path or stream URL.")
     parser.add_argument("--camera-id", default=None)
@@ -28,7 +29,7 @@ def main() -> None:
         db.add(job)
         db.commit()
         db.refresh(job)
-        VideoProcessor(get_settings()).process_job(db, job.id)
+        VideoProcessor(settings).process_job(db, job.id)
         db.refresh(job)
         print(f"job_id={job.id} status={job.status}")
     finally:

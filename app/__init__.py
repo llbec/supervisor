@@ -1,2 +1,1 @@
-"""Construction-site video supervision service."""
-
+"""Construction-site video supervision agent."""
